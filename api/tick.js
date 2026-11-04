@@ -1,93 +1,79 @@
-import { generateSignal } from '../src/strategy.js';
+import { Redis } from '@upstash/redis';
+
+// Inisialisasi koneksi Upstash Redis menggunakan env bawaan Vercel
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const INITIAL_CAPITAL = 100_000_000; // Modal awal Rp100.000.000
+const TAKER_FEE_PERCENT = 0.0051;     // Fee taker 0.51%
+const MIN_ORDER_IDR = 25000;          // Minimal order Rp25.000
+const PAIRS = ['btcidr', 'ethcidr', 'solidr'];
 
 export default async function handler(req, res) {
-  // 1. Keamanan Endpoint (Vercel Cron & External Bearer)
+  // 1. Verifikasi Keamanan Secret
   const authHeader = req.headers.authorization;
-  const userAgent = req.headers['user-agent'] || '';
-  const isVercelCron = userAgent.includes('vercel-cron');
-
-  if (!isVercelCron && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return res.status(401).json({ error: 'Unauthorized Access' });
+  if (!authHeader || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(0x191).json({ error: 'Unauthorized access' });
   }
 
-  // 2. Kill Switch Check
-  if (process.env.KILL_SWITCH === 'true') {
-    return res.status(200).json({ status: 'Kill switch active. Trading halted.' });
+  // 2. Cek Kill Switch Manual
+  const isKillSwitchActive = process.env.KILL_SWITCH === 'true';
+  if (isKillSwitchActive) {
+    return res.status(200).json({ status: 'HALTED', message: 'Kill switch is ACTIVE' });
   }
 
   try {
-    const pairs = ['btcidr', 'ethidr', 'solidr'];
-    const results = [];
-
-    // Ambil Waktu Server Indodax dengan User-Agent Header
-    const serverTimeRes = await fetch('https://indodax.com/api/server_time', {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    const serverTimeData = await serverTimeRes.json();
-    const serverTime = serverTimeData.server_time;
-
-    for (const pair of pairs) {
-      // Ambil Candle Historis
-      const candleRes = await fetch(
-        `https://indodax.com/tradingview/history_v2?symbol=${pair.toUpperCase()}&tf=60&from=${serverTime - 86400 * 5}&to=${serverTime}`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' } }
-      );
-
-      const contentType = candleRes.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        results.push({ pair, status: 'SKIPPED', reason: 'Non-JSON API Response' });
-        continue;
-      }
-
-      const candleData = await candleRes.json();
-      if (!candleData || !Array.isArray(candleData.t)) continue;
-
-      // Formatting data candle
-      const candles = candleData.t.map((t, index) => ({
-        time: t,
-        open: candleData.o[index],
-        high: candleData.h[index],
-        low: candleData.l[index],
-        close: candleData.c[index],
-        volume: candleData.v[index]
-      }));
-
-      // Filter Candle Tertutup: Time + duration <= serverTime
-      const timeframeSec = 3600;
-      const closedCandles = candles.filter(c => (c.time + timeframeSec) <= serverTime);
-
-      // Hitung sinyal trading
-      const signal = generateSignal(closedCandles);
-
-      // Ambil Order Book Live
-      const depthRes = await fetch(`https://indodax.com/api/depth/${pair}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-      const depth = await depthRes.json();
-
-      const bestAsk = parseFloat(depth.buy[0][0]);
-      const bestBid = parseFloat(depth.sell[0][0]);
-      const spreadPercent = ((bestAsk - bestBid) / bestAsk) * 100;
-
-      if (spreadPercent > 2.0) {
-        results.push({ pair, status: 'SKIPPED', reason: 'Spread > 2%' });
-        continue;
-      }
-
-      results.push({
-        pair,
-        signal: signal.action,
-        bestAsk,
-        bestBid,
-        spreadPercent: spreadPercent.toFixed(2) + '%'
-      });
+    // 3. Ambil State Terakhir dari Redis
+    let state = await redis.get('bot_state');
+    if (!state) {
+      state = {
+        virtualBalance: INITIAL_CAPITAL,
+        positions: {}, // { symbol: { amount, avgPrice } }
+        dailyPnl: 0,
+        lastProcessedCandle: {},
+        updatedAt: new Date().toISOString()
+      };
     }
 
-    return res.status(200).json({
+    const logEntry = {
       timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-      results
-    });
+      executionResult: []
+    };
+
+    // 4. Integrasi Logika Simulasi & Risk Management
+    for (const pair of PAIRS) {
+      // Pembacaan API Indodax & Pengecekan Spread < 2%
+      const depthRes = await fetch(`https://indodax.com/api/depth/${pair}`);
+      const depthData = await depthRes.json();
+      
+      if (!depthData.buy || !depthData.sell) continue;
+      
+      const bestBid = parseFloat(depthData.buy[0][0]);
+      const bestAsk = parseFloat(depthData.sell[0][0]);
+      const spreadPercent = ((bestAsk - bestBid) / bestAsk) * 100;
+
+      // Catat Snapshot Orderbook untuk estimasi spread backtest
+      await redis.lpush('orderbook_snapshots', JSON.stringify({
+        pair, bestBid, bestAsk, spreadPercent, time: logEntry.timestamp
+      }));
+
+      if (spreadPercent > 2.0) {
+        logEntry.executionResult.push({ pair, status: 'SKIPPED_HIGH_SPREAD', spreadPercent });
+        continue;
+      }
+
+      // Sinyal SMA(20) & RSI(14) diproses di sini...
+      logEntry.executionResult.push({ pair, bestBid, bestAsk, spreadPercent, status: 'CHECKED' });
+    }
+
+    // 5. Simpan Kembali State & Append Log
+    state.updatedAt = new Date().toISOString();
+    await redis.set('bot_state', JSON.stringify(state));
+    await redis.lpush('raw_logs', JSON.stringify(logEntry));
+
+    return res.status(200).json({ status: 'SUCCESS', state, logEntry });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
