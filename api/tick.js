@@ -5,13 +5,13 @@ const TAKER_FEE_RATE = 0.0051;
 const MIN_ORDER_IDR = 25000; // Ketentuan minimum order Rp25.000
 
 export default async function handler(req, res) {
-  // 1. Keamanan Endpoint (Mendukung Vercel Cron Bawaan & External Bearer)
-  const authHeader = req.headers.authorization;
-  const isVercelCron = req.headers['user-agent']?.includes('vercel-cron');
+// 1. Keamanan Endpoint (Mendukung Vercel Cron Bawaan & External Bearer)
+  // const authHeader = req.headers.authorization;
+  // const isVercelCron = req.headers['user-agent']?.includes('vercel-cron');
 
-  if (!isVercelCron && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return res.status(401).json({ error: 'Unauthorized Access' });
-  }
+  // if (!isVercelCron && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  //   return res.status(401).json({ error: 'Unauthorized Access' });
+  // }
 
   // 2. Kill Switch Check
   if (process.env.KILL_SWITCH === 'true') {
