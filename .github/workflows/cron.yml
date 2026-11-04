@@ -1,0 +1,17 @@
+name: Hourly Trading Bot Trigger
+
+on:
+  schedule:
+    # Berjalan setiap jam pada menit ke-7 UTC
+    - cron: '7 * * * *'
+  workflow_dispatch: # Agar bisa ditekan tombol manual "Run Workflow" di GitHub
+
+jobs:
+  trigger-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Vercel Tick Endpoint
+        run: |
+          curl -X GET "https://uas-algorithmic-trading-indodax-dya.vercel.app/api/tick" \
+               -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+               -H "User-Agent: vercel-cron"
